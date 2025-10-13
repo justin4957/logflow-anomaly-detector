@@ -1,0 +1,16 @@
+log_path: "/var/log/app.log"
+log_format: "json" # Options: json, apache, combined, common
+
+detector:
+  window_size: 100
+  sensitivity_level: 2.0 # Standard deviations from mean
+  baseline_minutes: 10
+  error_rate_threshold: 0.05
+  algorithm: "stddev" # Options: stddev, moving_average, cusum
+
+dashboard:
+  port: 8080
+  host: "localhost"
+  enable_tui: false
+  refresh_rate_ms: 1000
+  max_log_lines: 500
