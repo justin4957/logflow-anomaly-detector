@@ -8,6 +8,14 @@ import (
 	"github.com/justin4957/logflow-anomaly-detector/pkg/models"
 )
 
+// responseTimePool reuses slices for response times to reduce allocations
+var responseTimePool = sync.Pool{
+	New: func() interface{} {
+		slice := make([]float64, 0, 1024)
+		return &slice
+	},
+}
+
 // MetricsCollector collects and aggregates log metrics
 type MetricsCollector struct {
 	windowSize         int
@@ -40,13 +48,14 @@ func NewMetricsCollector(windowSize int) *MetricsCollector {
 }
 
 func newMetricsWindow() *MetricsWindow {
+	// Pre-allocate maps with reasonable capacity to reduce rehashing
 	return &MetricsWindow{
 		startTime:     time.Now(),
-		statusCodes:   make(map[int]int),
-		paths:         make(map[string]int),
-		ips:           make(map[string]int),
-		userAgents:    make(map[string]int),
-		responseTimes: make([]float64, 0),
+		statusCodes:   make(map[int]int, 10),
+		paths:         make(map[string]int, 50),
+		ips:           make(map[string]int, 100),
+		userAgents:    make(map[string]int, 20),
+		responseTimes: make([]float64, 0, 1000),
 	}
 }
 
@@ -145,12 +154,17 @@ func (mc *MetricsCollector) computeMetrics(window *MetricsWindow) *models.Metric
 }
 
 func getTopPaths(paths map[string]int, limit int) []models.PathCount {
+	if len(paths) == 0 {
+		return nil
+	}
+
 	type kv struct {
 		Key   string
 		Value int
 	}
 
-	var sorted []kv
+	// Pre-allocate slice with exact capacity needed
+	sorted := make([]kv, 0, len(paths))
 	for k, v := range paths {
 		sorted = append(sorted, kv{k, v})
 	}
@@ -159,24 +173,35 @@ func getTopPaths(paths map[string]int, limit int) []models.PathCount {
 		return sorted[i].Value > sorted[j].Value
 	})
 
-	result := make([]models.PathCount, 0, limit)
-	for i := 0; i < len(sorted) && i < limit; i++ {
-		result = append(result, models.PathCount{
+	// Calculate actual result size
+	resultSize := limit
+	if len(sorted) < limit {
+		resultSize = len(sorted)
+	}
+
+	result := make([]models.PathCount, resultSize)
+	for i := 0; i < resultSize; i++ {
+		result[i] = models.PathCount{
 			Path:  sorted[i].Key,
 			Count: sorted[i].Value,
-		})
+		}
 	}
 
 	return result
 }
 
 func getTopIPs(ips map[string]int, limit int) []models.IPCount {
+	if len(ips) == 0 {
+		return nil
+	}
+
 	type kv struct {
 		Key   string
 		Value int
 	}
 
-	var sorted []kv
+	// Pre-allocate slice with exact capacity needed
+	sorted := make([]kv, 0, len(ips))
 	for k, v := range ips {
 		sorted = append(sorted, kv{k, v})
 	}
@@ -185,24 +210,35 @@ func getTopIPs(ips map[string]int, limit int) []models.IPCount {
 		return sorted[i].Value > sorted[j].Value
 	})
 
-	result := make([]models.IPCount, 0, limit)
-	for i := 0; i < len(sorted) && i < limit; i++ {
-		result = append(result, models.IPCount{
+	// Calculate actual result size
+	resultSize := limit
+	if len(sorted) < limit {
+		resultSize = len(sorted)
+	}
+
+	result := make([]models.IPCount, resultSize)
+	for i := 0; i < resultSize; i++ {
+		result[i] = models.IPCount{
 			IP:    sorted[i].Key,
 			Count: sorted[i].Value,
-		})
+		}
 	}
 
 	return result
 }
 
 func getTopUserAgents(userAgents map[string]int, limit int) []models.UserAgentCount {
+	if len(userAgents) == 0 {
+		return nil
+	}
+
 	type kv struct {
 		Key   string
 		Value int
 	}
 
-	var sorted []kv
+	// Pre-allocate slice with exact capacity needed
+	sorted := make([]kv, 0, len(userAgents))
 	for k, v := range userAgents {
 		sorted = append(sorted, kv{k, v})
 	}
@@ -211,12 +247,18 @@ func getTopUserAgents(userAgents map[string]int, limit int) []models.UserAgentCo
 		return sorted[i].Value > sorted[j].Value
 	})
 
-	result := make([]models.UserAgentCount, 0, limit)
-	for i := 0; i < len(sorted) && i < limit; i++ {
-		result = append(result, models.UserAgentCount{
+	// Calculate actual result size
+	resultSize := limit
+	if len(sorted) < limit {
+		resultSize = len(sorted)
+	}
+
+	result := make([]models.UserAgentCount, resultSize)
+	for i := 0; i < resultSize; i++ {
+		result[i] = models.UserAgentCount{
 			UserAgent: sorted[i].Key,
 			Count:     sorted[i].Value,
-		})
+		}
 	}
 
 	return result

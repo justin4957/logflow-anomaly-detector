@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/http/pprof"
 	"sync"
 
 	"github.com/gorilla/websocket"
@@ -53,6 +54,19 @@ func (s *Server) Start(ctx context.Context, input <-chan interface{}) {
 	mux.HandleFunc("/ws", s.handleWebSocket)
 	mux.HandleFunc("/api/metrics", s.handleMetrics)
 	mux.HandleFunc("/", s.handleIndex)
+
+	// Add pprof endpoints for profiling
+	mux.HandleFunc("/debug/pprof/", pprof.Index)
+	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	mux.Handle("/debug/pprof/heap", pprof.Handler("heap"))
+	mux.Handle("/debug/pprof/goroutine", pprof.Handler("goroutine"))
+	mux.Handle("/debug/pprof/block", pprof.Handler("block"))
+	mux.Handle("/debug/pprof/threadcreate", pprof.Handler("threadcreate"))
+	mux.Handle("/debug/pprof/mutex", pprof.Handler("mutex"))
+	mux.Handle("/debug/pprof/allocs", pprof.Handler("allocs"))
 
 	addr := fmt.Sprintf("%s:%d", s.config.Host, s.config.Port)
 	server := &http.Server{

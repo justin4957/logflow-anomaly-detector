@@ -46,16 +46,20 @@ type ApacheParser struct {
 	regex *regexp.Regexp
 }
 
+// Pre-compiled regex patterns for better performance
+var (
+	apacheRegex = regexp.MustCompile(
+		`^(\S+) \S+ \S+ \[([^\]]+)\] "(\S+) (\S+) \S+" (\d+) (\S+) "([^"]*)" "([^"]*)"`,
+	)
+	commonLogRegex = regexp.MustCompile(
+		`^(\S+) \S+ \S+ \[([^\]]+)\] "(\S+) (\S+) \S+" (\d+) (\S+)`,
+	)
+)
+
 func (p *ApacheParser) Parse(line string) (*models.LogEntry, error) {
 	// Apache Combined Log Format:
 	// %h %l %u %t \"%r\" %>s %b \"%{Referer}i\" \"%{User-agent}i\"
-	if p.regex == nil {
-		p.regex = regexp.MustCompile(
-			`^(\S+) \S+ \S+ \[([^\]]+)\] "(\S+) (\S+) \S+" (\d+) (\S+) "([^"]*)" "([^"]*)"`,
-		)
-	}
-
-	matches := p.regex.FindStringSubmatch(line)
+	matches := apacheRegex.FindStringSubmatch(line)
 	if len(matches) != 9 {
 		return nil, fmt.Errorf("invalid Apache log format")
 	}
@@ -96,13 +100,7 @@ type CommonLogParser struct {
 
 func (p *CommonLogParser) Parse(line string) (*models.LogEntry, error) {
 	// Common Log Format: %h %l %u %t \"%r\" %>s %b
-	if p.regex == nil {
-		p.regex = regexp.MustCompile(
-			`^(\S+) \S+ \S+ \[([^\]]+)\] "(\S+) (\S+) \S+" (\d+) (\S+)`,
-		)
-	}
-
-	matches := p.regex.FindStringSubmatch(line)
+	matches := commonLogRegex.FindStringSubmatch(line)
 	if len(matches) != 7 {
 		return nil, fmt.Errorf("invalid Common log format")
 	}
