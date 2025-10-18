@@ -26,7 +26,7 @@ func NewAnomalyDetector(cfg config.DetectorConfig) *AnomalyDetector {
 	var algo DetectionAlgorithm
 	switch cfg.Algorithm {
 	case "moving_average":
-		algo = &MovingAverageDetector{threshold: cfg.SensitivityLevel}
+		algo = NewMovingAverageDetector(cfg.SensitivityLevel, cfg.SmoothingFactor)
 	case "cusum":
 		algo = &CUSUMDetector{threshold: cfg.SensitivityLevel}
 	default:
@@ -142,14 +142,139 @@ func (d *StdDevDetector) Detect(current *models.Metrics, historical []models.Met
 	return anomalies
 }
 
-// MovingAverageDetector uses moving average for detection
+// MovingAverageDetector uses exponentially weighted moving average for detection
 type MovingAverageDetector struct {
-	threshold float64
+	threshold              float64
+	alpha                  float64 // smoothing factor
+	ewmaErrorRate          float64
+	ewmaRequestsPerSec     float64
+	ewmaAvgResponseTime    float64
+	initialized            bool
+}
+
+// NewMovingAverageDetector creates a new moving average detector with configurable alpha
+func NewMovingAverageDetector(threshold, alpha float64) *MovingAverageDetector {
+	// Default alpha to 0.3 if not specified (gives more weight to recent observations)
+	if alpha <= 0 || alpha >= 1 {
+		alpha = 0.3
+	}
+	return &MovingAverageDetector{
+		threshold:   threshold,
+		alpha:       alpha,
+		initialized: false,
+	}
 }
 
 func (d *MovingAverageDetector) Detect(current *models.Metrics, historical []models.Metrics) []models.Anomaly {
-	// TODO: Implement moving average based detection
-	return []models.Anomaly{}
+	anomalies := []models.Anomaly{}
+
+	// Handle cold start - need at least some historical data to establish baseline
+	if !d.initialized {
+		if len(historical) < 5 {
+			return anomalies // Not enough data for baseline
+		}
+		// Initialize EWMA with mean of first few historical values
+		d.initializeEWMA(historical)
+		d.initialized = true
+	}
+
+	// Update EWMA with current values and check for anomalies
+	// EWMA formula: EWMA(t) = α × value(t) + (1 - α) × EWMA(t-1)
+
+	// Check error rate
+	previousEWMAErrorRate := d.ewmaErrorRate
+	d.ewmaErrorRate = d.alpha*current.ErrorRate + (1-d.alpha)*d.ewmaErrorRate
+	deviation := math.Abs(current.ErrorRate - previousEWMAErrorRate)
+
+	if deviation > d.threshold*previousEWMAErrorRate && previousEWMAErrorRate > 0.01 {
+		anomalies = append(anomalies, models.Anomaly{
+			Timestamp:     time.Now(),
+			Type:          models.AnomalyTypeErrorRate,
+			Severity:      calculateEWMASeverity(deviation, previousEWMAErrorRate),
+			Description:   "Abnormal error rate detected",
+			Metric:        "error_rate",
+			ActualValue:   current.ErrorRate,
+			ExpectedValue: previousEWMAErrorRate,
+			Deviation:     deviation,
+		})
+	}
+
+	// Check request rate
+	previousEWMARequestsPerSec := d.ewmaRequestsPerSec
+	d.ewmaRequestsPerSec = d.alpha*current.RequestsPerSec + (1-d.alpha)*d.ewmaRequestsPerSec
+	deviation = math.Abs(current.RequestsPerSec - previousEWMARequestsPerSec)
+
+	if deviation > d.threshold*previousEWMARequestsPerSec && previousEWMARequestsPerSec > 0 {
+		anomalies = append(anomalies, models.Anomaly{
+			Timestamp:     time.Now(),
+			Type:          models.AnomalyTypeTrafficSpike,
+			Severity:      calculateEWMASeverity(deviation, previousEWMARequestsPerSec),
+			Description:   "Traffic spike or drop detected",
+			Metric:        "requests_per_sec",
+			ActualValue:   current.RequestsPerSec,
+			ExpectedValue: previousEWMARequestsPerSec,
+			Deviation:     deviation,
+		})
+	}
+
+	// Check response time (only alert on increases, not decreases)
+	previousEWMAResponseTime := d.ewmaAvgResponseTime
+	d.ewmaAvgResponseTime = d.alpha*current.AvgResponseTime + (1-d.alpha)*d.ewmaAvgResponseTime
+	deviation = current.AvgResponseTime - previousEWMAResponseTime
+
+	if deviation > d.threshold*previousEWMAResponseTime && previousEWMAResponseTime > 0 {
+		anomalies = append(anomalies, models.Anomaly{
+			Timestamp:     time.Now(),
+			Type:          models.AnomalyTypeResponseTime,
+			Severity:      calculateEWMASeverity(deviation, previousEWMAResponseTime),
+			Description:   "Response time degradation detected",
+			Metric:        "avg_response_time",
+			ActualValue:   current.AvgResponseTime,
+			ExpectedValue: previousEWMAResponseTime,
+			Deviation:     deviation,
+		})
+	}
+
+	return anomalies
+}
+
+// initializeEWMA sets initial EWMA values using mean of historical data
+func (d *MovingAverageDetector) initializeEWMA(historical []models.Metrics) {
+	if len(historical) == 0 {
+		return
+	}
+
+	sumErrorRate := 0.0
+	sumRequestsPerSec := 0.0
+	sumAvgResponseTime := 0.0
+
+	for _, m := range historical {
+		sumErrorRate += m.ErrorRate
+		sumRequestsPerSec += m.RequestsPerSec
+		sumAvgResponseTime += m.AvgResponseTime
+	}
+
+	count := float64(len(historical))
+	d.ewmaErrorRate = sumErrorRate / count
+	d.ewmaRequestsPerSec = sumRequestsPerSec / count
+	d.ewmaAvgResponseTime = sumAvgResponseTime / count
+}
+
+// calculateEWMASeverity determines severity based on relative deviation
+func calculateEWMASeverity(deviation, expected float64) models.Severity {
+	if expected == 0 {
+		return models.SeverityLow
+	}
+
+	relativeDeviation := deviation / expected
+	if relativeDeviation > 2.0 {
+		return models.SeverityCritical
+	} else if relativeDeviation > 1.0 {
+		return models.SeverityHigh
+	} else if relativeDeviation > 0.5 {
+		return models.SeverityMedium
+	}
+	return models.SeverityLow
 }
 
 // CUSUMDetector uses CUSUM algorithm for detection

@@ -21,6 +21,7 @@ type DetectorConfig struct {
 	BaselineMinutes    int     `yaml:"baseline_minutes"`
 	ErrorRateThreshold float64 `yaml:"error_rate_threshold"`
 	Algorithm          string  `yaml:"algorithm"` // "moving_average", "cusum", or "stddev"
+	SmoothingFactor    float64 `yaml:"smoothing_factor"` // Alpha parameter for moving average (0-1)
 }
 
 // DashboardConfig contains web dashboard settings
@@ -59,6 +60,7 @@ func DefaultConfig() *Config {
 			BaselineMinutes:    10,
 			ErrorRateThreshold: 0.05,
 			Algorithm:          "stddev",
+			SmoothingFactor:    0.3,
 		},
 		DashboardConfig: DashboardConfig{
 			Port:           8080,
