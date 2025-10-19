@@ -28,7 +28,7 @@ func NewAnomalyDetector(cfg config.DetectorConfig) *AnomalyDetector {
 	case "moving_average":
 		algo = NewMovingAverageDetector(cfg.SensitivityLevel, cfg.SmoothingFactor)
 	case "cusum":
-		algo = &CUSUMDetector{threshold: cfg.SensitivityLevel}
+		algo = NewCUSUMDetector(cfg.CUSUMSlack, cfg.CUSUMThreshold)
 	default:
 		algo = &StdDevDetector{threshold: cfg.SensitivityLevel}
 	}
@@ -277,14 +277,200 @@ func calculateEWMASeverity(deviation, expected float64) models.Severity {
 	return models.SeverityLow
 }
 
-// CUSUMDetector uses CUSUM algorithm for detection
+// CUSUMDetector uses CUSUM (Cumulative Sum) algorithm for detecting subtle shifts
 type CUSUMDetector struct {
-	threshold float64
+	slackParameter     float64 // k: allowable deviation from mean
+	decisionThreshold  float64 // h: threshold for triggering anomaly
+
+	// State tracking for each metric - positive and negative cumulative sums
+	cusumPosErrorRate      float64
+	cusumNegErrorRate      float64
+	cusumPosRequestsPerSec float64
+	cusumNegRequestsPerSec float64
+	cusumPosResponseTime   float64
+	cusumNegResponseTime   float64
+
+	// Reference values (target means) for each metric
+	referenceErrorRate      float64
+	referenceRequestsPerSec float64
+	referenceResponseTime   float64
+
+	initialized bool
+}
+
+// NewCUSUMDetector creates a new CUSUM detector with configurable parameters
+func NewCUSUMDetector(slackParameter, decisionThreshold float64) *CUSUMDetector {
+	// Default values if not specified
+	if slackParameter <= 0 {
+		slackParameter = 0.5
+	}
+	if decisionThreshold <= 0 {
+		decisionThreshold = 5.0
+	}
+
+	return &CUSUMDetector{
+		slackParameter:    slackParameter,
+		decisionThreshold: decisionThreshold,
+		initialized:       false,
+	}
 }
 
 func (d *CUSUMDetector) Detect(current *models.Metrics, historical []models.Metrics) []models.Anomaly {
-	// TODO: Implement CUSUM algorithm
-	return []models.Anomaly{}
+	anomalies := []models.Anomaly{}
+
+	// Need baseline data to establish reference values
+	if !d.initialized {
+		if len(historical) < 10 {
+			return anomalies // Not enough data for baseline
+		}
+		d.initializeReferences(historical)
+		d.initialized = true
+	}
+
+	// Check error rate using CUSUM
+	errorRateAnomaly := d.detectCUSUMAnomaly(
+		current.ErrorRate,
+		&d.cusumPosErrorRate,
+		&d.cusumNegErrorRate,
+		d.referenceErrorRate,
+		"error_rate",
+		models.AnomalyTypeErrorRate,
+		"Persistent error rate shift detected",
+	)
+	if errorRateAnomaly != nil {
+		anomalies = append(anomalies, *errorRateAnomaly)
+	}
+
+	// Check request rate using CUSUM
+	requestRateAnomaly := d.detectCUSUMAnomaly(
+		current.RequestsPerSec,
+		&d.cusumPosRequestsPerSec,
+		&d.cusumNegRequestsPerSec,
+		d.referenceRequestsPerSec,
+		"requests_per_sec",
+		models.AnomalyTypeTrafficSpike,
+		"Persistent traffic pattern change detected",
+	)
+	if requestRateAnomaly != nil {
+		anomalies = append(anomalies, *requestRateAnomaly)
+	}
+
+	// Check response time using CUSUM
+	responseTimeAnomaly := d.detectCUSUMAnomaly(
+		current.AvgResponseTime,
+		&d.cusumPosResponseTime,
+		&d.cusumNegResponseTime,
+		d.referenceResponseTime,
+		"avg_response_time",
+		models.AnomalyTypeResponseTime,
+		"Persistent response time degradation detected",
+	)
+	if responseTimeAnomaly != nil {
+		anomalies = append(anomalies, *responseTimeAnomaly)
+	}
+
+	return anomalies
+}
+
+// detectCUSUMAnomaly applies CUSUM algorithm to a single metric
+func (d *CUSUMDetector) detectCUSUMAnomaly(
+	currentValue float64,
+	cusumPos *float64,
+	cusumNeg *float64,
+	referenceMean float64,
+	metricName string,
+	anomalyType models.AnomalyType,
+	description string,
+) *models.Anomaly {
+	// CUSUM formulas:
+	// S⁺(t) = max(0, S⁺(t-1) + (x(t) - μ - k))
+	// S⁻(t) = max(0, S⁻(t-1) - (x(t) - μ + k))
+
+	// Calculate positive CUSUM (detects upward shifts)
+	*cusumPos = math.Max(0, *cusumPos + (currentValue - referenceMean - d.slackParameter))
+
+	// Calculate negative CUSUM (detects downward shifts)
+	*cusumNeg = math.Max(0, *cusumNeg - (currentValue - referenceMean + d.slackParameter))
+
+	// Check if either cumulative sum exceeds the decision threshold
+	if *cusumPos > d.decisionThreshold {
+		// Upward shift detected
+		severity := calculateCUSUMSeverity(*cusumPos, d.decisionThreshold)
+		deviation := currentValue - referenceMean
+
+		// Reset CUSUM after detection
+		*cusumPos = 0
+		*cusumNeg = 0
+
+		return &models.Anomaly{
+			Timestamp:     time.Now(),
+			Type:          anomalyType,
+			Severity:      severity,
+			Description:   description + " (upward shift)",
+			Metric:        metricName,
+			ActualValue:   currentValue,
+			ExpectedValue: referenceMean,
+			Deviation:     deviation,
+		}
+	}
+
+	if *cusumNeg > d.decisionThreshold {
+		// Downward shift detected
+		severity := calculateCUSUMSeverity(*cusumNeg, d.decisionThreshold)
+		deviation := referenceMean - currentValue
+
+		// Reset CUSUM after detection
+		*cusumPos = 0
+		*cusumNeg = 0
+
+		return &models.Anomaly{
+			Timestamp:     time.Now(),
+			Type:          anomalyType,
+			Severity:      severity,
+			Description:   description + " (downward shift)",
+			Metric:        metricName,
+			ActualValue:   currentValue,
+			ExpectedValue: referenceMean,
+			Deviation:     deviation,
+		}
+	}
+
+	return nil
+}
+
+// initializeReferences calculates reference values (target means) from historical data
+func (d *CUSUMDetector) initializeReferences(historical []models.Metrics) {
+	if len(historical) == 0 {
+		return
+	}
+
+	sumErrorRate := 0.0
+	sumRequestsPerSec := 0.0
+	sumResponseTime := 0.0
+
+	for _, m := range historical {
+		sumErrorRate += m.ErrorRate
+		sumRequestsPerSec += m.RequestsPerSec
+		sumResponseTime += m.AvgResponseTime
+	}
+
+	count := float64(len(historical))
+	d.referenceErrorRate = sumErrorRate / count
+	d.referenceRequestsPerSec = sumRequestsPerSec / count
+	d.referenceResponseTime = sumResponseTime / count
+}
+
+// calculateCUSUMSeverity determines severity based on how much CUSUM exceeds threshold
+func calculateCUSUMSeverity(cusumValue, threshold float64) models.Severity {
+	ratio := cusumValue / threshold
+	if ratio > 3.0 {
+		return models.SeverityCritical
+	} else if ratio > 2.0 {
+		return models.SeverityHigh
+	} else if ratio > 1.5 {
+		return models.SeverityMedium
+	}
+	return models.SeverityLow
 }
 
 // Helper functions
