@@ -22,6 +22,8 @@ type DetectorConfig struct {
 	ErrorRateThreshold float64 `yaml:"error_rate_threshold"`
 	Algorithm          string  `yaml:"algorithm"` // "moving_average", "cusum", or "stddev"
 	SmoothingFactor    float64 `yaml:"smoothing_factor"` // Alpha parameter for moving average (0-1)
+	CUSUMSlack         float64 `yaml:"cusum_slack"` // k parameter: slack/allowable deviation for CUSUM
+	CUSUMThreshold     float64 `yaml:"cusum_threshold"` // h parameter: decision threshold for CUSUM
 }
 
 // DashboardConfig contains web dashboard settings
@@ -61,6 +63,8 @@ func DefaultConfig() *Config {
 			ErrorRateThreshold: 0.05,
 			Algorithm:          "stddev",
 			SmoothingFactor:    0.3,
+			CUSUMSlack:         0.5,  // Default slack parameter
+			CUSUMThreshold:     5.0,  // Default decision threshold
 		},
 		DashboardConfig: DashboardConfig{
 			Port:           8080,

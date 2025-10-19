@@ -370,3 +370,349 @@ func TestMovingAverageDetector_MultipleAnomaliesSimultaneous(t *testing.T) {
 		}
 	}
 }
+
+// CUSUM Detector Tests
+
+// TestCUSUMDetector_ColdStart tests behavior with insufficient data
+func TestCUSUMDetector_ColdStart(t *testing.T) {
+	detector := NewCUSUMDetector(0.5, 5.0)
+	current := createTestMetrics(100.0, 0.05, 50.0)
+
+	// Test with insufficient historical data
+	historical := generateHistoricalMetrics(3)
+	anomalies := detector.Detect(current, historical)
+
+	if len(anomalies) != 0 {
+		t.Errorf("Expected no anomalies with insufficient data, got %d", len(anomalies))
+	}
+
+	if detector.initialized {
+		t.Error("Detector should not be initialized with insufficient data")
+	}
+}
+
+// TestCUSUMDetector_Initialization tests reference value initialization
+func TestCUSUMDetector_Initialization(t *testing.T) {
+	detector := NewCUSUMDetector(0.5, 5.0)
+	current := createTestMetrics(100.0, 0.05, 50.0)
+
+	// Create baseline with consistent values
+	historical := make([]models.Metrics, 10)
+	for i := 0; i < 10; i++ {
+		historical[i] = *createTestMetrics(100.0, 0.05, 50.0)
+	}
+
+	_ = detector.Detect(current, historical)
+
+	if !detector.initialized {
+		t.Error("Detector should be initialized after processing sufficient data")
+	}
+
+	// Check that reference values are initialized to baseline means
+	expectedErrorRate := 0.05
+	expectedRequestsPerSec := 100.0
+	expectedResponseTime := 50.0
+
+	if detector.referenceErrorRate != expectedErrorRate {
+		t.Errorf("Expected reference error rate %f, got %f", expectedErrorRate, detector.referenceErrorRate)
+	}
+	if detector.referenceRequestsPerSec != expectedRequestsPerSec {
+		t.Errorf("Expected reference requests per sec %f, got %f", expectedRequestsPerSec, detector.referenceRequestsPerSec)
+	}
+	if detector.referenceResponseTime != expectedResponseTime {
+		t.Errorf("Expected reference response time %f, got %f", expectedResponseTime, detector.referenceResponseTime)
+	}
+}
+
+// TestCUSUMDetector_UpwardShiftDetection tests detection of upward metric shifts
+func TestCUSUMDetector_UpwardShiftDetection(t *testing.T) {
+	detector := NewCUSUMDetector(0.5, 5.0)
+
+	// Create stable baseline at 100 requests/sec
+	historical := make([]models.Metrics, 10)
+	for i := 0; i < 10; i++ {
+		historical[i] = *createTestMetrics(100.0, 0.05, 50.0)
+	}
+
+	// Initialize detector with baseline
+	_ = detector.Detect(createTestMetrics(100.0, 0.05, 50.0), historical)
+
+	// Simulate persistent upward shift (small increases that accumulate)
+	// Each step is small (110 vs 100), but persistent
+	for i := 0; i < 15; i++ {
+		current := createTestMetrics(110.0, 0.05, 50.0)
+		anomalies := detector.Detect(current, historical)
+
+		// Should eventually detect the persistent upward shift
+		if len(anomalies) > 0 {
+			foundTrafficAnomaly := false
+			for _, anomaly := range anomalies {
+				if anomaly.Type == models.AnomalyTypeTrafficSpike {
+					foundTrafficAnomaly = true
+					if anomaly.Description != "Persistent traffic pattern change detected (upward shift)" {
+						t.Errorf("Expected upward shift description, got %s", anomaly.Description)
+					}
+				}
+			}
+			if foundTrafficAnomaly {
+				return // Test passed - detected upward shift
+			}
+		}
+	}
+
+	t.Error("Expected to detect persistent upward shift in traffic")
+}
+
+// TestCUSUMDetector_DownwardShiftDetection tests detection of downward metric shifts
+func TestCUSUMDetector_DownwardShiftDetection(t *testing.T) {
+	detector := NewCUSUMDetector(0.5, 5.0)
+
+	// Create stable baseline at 100 requests/sec
+	historical := make([]models.Metrics, 10)
+	for i := 0; i < 10; i++ {
+		historical[i] = *createTestMetrics(100.0, 0.05, 50.0)
+	}
+
+	// Initialize detector
+	_ = detector.Detect(createTestMetrics(100.0, 0.05, 50.0), historical)
+
+	// Simulate persistent downward shift
+	for i := 0; i < 15; i++ {
+		current := createTestMetrics(90.0, 0.05, 50.0)
+		anomalies := detector.Detect(current, historical)
+
+		// Should eventually detect the persistent downward shift
+		if len(anomalies) > 0 {
+			foundTrafficAnomaly := false
+			for _, anomaly := range anomalies {
+				if anomaly.Type == models.AnomalyTypeTrafficSpike {
+					foundTrafficAnomaly = true
+					if anomaly.Description != "Persistent traffic pattern change detected (downward shift)" {
+						t.Errorf("Expected downward shift description, got %s", anomaly.Description)
+					}
+				}
+			}
+			if foundTrafficAnomaly {
+				return // Test passed - detected downward shift
+			}
+		}
+	}
+
+	t.Error("Expected to detect persistent downward shift in traffic")
+}
+
+// TestCUSUMDetector_ErrorRateShiftDetection tests error rate anomaly detection
+func TestCUSUMDetector_ErrorRateShiftDetection(t *testing.T) {
+	detector := NewCUSUMDetector(0.01, 3.0) // More sensitive for error rates
+
+	// Create stable baseline
+	historical := make([]models.Metrics, 10)
+	for i := 0; i < 10; i++ {
+		historical[i] = *createTestMetrics(100.0, 0.05, 50.0)
+	}
+
+	// Initialize detector
+	_ = detector.Detect(createTestMetrics(100.0, 0.05, 50.0), historical)
+
+	// Simulate persistent error rate increase (small but consistent)
+	for i := 0; i < 10; i++ {
+		current := createTestMetrics(100.0, 0.08, 50.0) // Error rate: 0.05 -> 0.08
+		anomalies := detector.Detect(current, historical)
+
+		if len(anomalies) > 0 {
+			for _, anomaly := range anomalies {
+				if anomaly.Type == models.AnomalyTypeErrorRate {
+					if anomaly.ActualValue != 0.08 {
+						t.Errorf("Expected actual error rate 0.08, got %f", anomaly.ActualValue)
+					}
+					return // Test passed
+				}
+			}
+		}
+	}
+
+	t.Error("Expected to detect persistent error rate shift")
+}
+
+// TestCUSUMDetector_ResponseTimeShiftDetection tests response time anomaly detection
+func TestCUSUMDetector_ResponseTimeShiftDetection(t *testing.T) {
+	detector := NewCUSUMDetector(1.0, 4.0)
+
+	// Create stable baseline
+	historical := make([]models.Metrics, 10)
+	for i := 0; i < 10; i++ {
+		historical[i] = *createTestMetrics(100.0, 0.05, 50.0)
+	}
+
+	// Initialize detector
+	_ = detector.Detect(createTestMetrics(100.0, 0.05, 50.0), historical)
+
+	// Simulate persistent response time increase
+	for i := 0; i < 10; i++ {
+		current := createTestMetrics(100.0, 0.05, 60.0) // Response time: 50ms -> 60ms
+		anomalies := detector.Detect(current, historical)
+
+		if len(anomalies) > 0 {
+			for _, anomaly := range anomalies {
+				if anomaly.Type == models.AnomalyTypeResponseTime {
+					if anomaly.ActualValue != 60.0 {
+						t.Errorf("Expected actual response time 60.0, got %f", anomaly.ActualValue)
+					}
+					return // Test passed
+				}
+			}
+		}
+	}
+
+	t.Error("Expected to detect persistent response time shift")
+}
+
+// TestCUSUMDetector_ResetAfterDetection tests that CUSUM resets after anomaly
+func TestCUSUMDetector_ResetAfterDetection(t *testing.T) {
+	detector := NewCUSUMDetector(0.5, 5.0)
+
+	// Create baseline
+	historical := make([]models.Metrics, 10)
+	for i := 0; i < 10; i++ {
+		historical[i] = *createTestMetrics(100.0, 0.05, 50.0)
+	}
+
+	// Initialize
+	_ = detector.Detect(createTestMetrics(100.0, 0.05, 50.0), historical)
+
+	// Force cumulative sum to build up and trigger anomaly
+	for i := 0; i < 20; i++ {
+		current := createTestMetrics(110.0, 0.05, 50.0)
+		anomalies := detector.Detect(current, historical)
+
+		if len(anomalies) > 0 {
+			// After anomaly detection, CUSUM should be reset
+			if detector.cusumPosRequestsPerSec != 0 || detector.cusumNegRequestsPerSec != 0 {
+				t.Error("CUSUM values should be reset to 0 after anomaly detection")
+			}
+			return
+		}
+	}
+}
+
+// TestCUSUMDetector_NoAnomalyOnStableMetrics tests no false positives
+func TestCUSUMDetector_NoAnomalyOnStableMetrics(t *testing.T) {
+	detector := NewCUSUMDetector(0.5, 5.0)
+
+	// Create stable baseline
+	historical := make([]models.Metrics, 10)
+	for i := 0; i < 10; i++ {
+		historical[i] = *createTestMetrics(100.0, 0.05, 50.0)
+	}
+
+	// Initialize
+	_ = detector.Detect(createTestMetrics(100.0, 0.05, 50.0), historical)
+
+	// Test with stable metrics (within slack parameter tolerance)
+	for i := 0; i < 20; i++ {
+		current := createTestMetrics(100.2, 0.051, 50.1) // Very small variations
+		anomalies := detector.Detect(current, historical)
+
+		if len(anomalies) != 0 {
+			t.Errorf("Expected no anomalies on stable metrics, got %d", len(anomalies))
+		}
+	}
+}
+
+// TestCUSUMDetector_ParameterValidation tests parameter defaults
+func TestCUSUMDetector_ParameterValidation(t *testing.T) {
+	testCases := []struct {
+		name              string
+		slack             float64
+		threshold         float64
+		expectedSlack     float64
+		expectedThreshold float64
+	}{
+		{"ZeroSlack", 0.0, 5.0, 0.5, 5.0},
+		{"NegativeSlack", -0.5, 5.0, 0.5, 5.0},
+		{"ZeroThreshold", 0.5, 0.0, 0.5, 5.0},
+		{"NegativeThreshold", 0.5, -1.0, 0.5, 5.0},
+		{"ValidParameters", 1.0, 10.0, 1.0, 10.0},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			detector := NewCUSUMDetector(tc.slack, tc.threshold)
+			if detector.slackParameter != tc.expectedSlack {
+				t.Errorf("Expected slack %f, got %f", tc.expectedSlack, detector.slackParameter)
+			}
+			if detector.decisionThreshold != tc.expectedThreshold {
+				t.Errorf("Expected threshold %f, got %f", tc.expectedThreshold, detector.decisionThreshold)
+			}
+		})
+	}
+}
+
+// TestCUSUMDetector_SeverityLevels tests anomaly severity calculation
+func TestCUSUMDetector_SeverityLevels(t *testing.T) {
+	// Use very low threshold to trigger anomalies more easily for testing
+	detector := NewCUSUMDetector(0.1, 1.0)
+
+	// Create baseline
+	historical := make([]models.Metrics, 10)
+	for i := 0; i < 10; i++ {
+		historical[i] = *createTestMetrics(100.0, 0.05, 50.0)
+	}
+
+	// Initialize
+	_ = detector.Detect(createTestMetrics(100.0, 0.05, 50.0), historical)
+
+	// Force a large shift to build up CUSUM quickly
+	// The severity depends on CUSUM value relative to threshold
+	for i := 0; i < 20; i++ {
+		current := createTestMetrics(120.0, 0.05, 50.0)
+		anomalies := detector.Detect(current, historical)
+
+		if len(anomalies) > 0 {
+			// Just verify that severity is calculated
+			for _, anomaly := range anomalies {
+				if anomaly.Severity == "" {
+					t.Error("Anomaly should have a severity level")
+				}
+			}
+			return
+		}
+	}
+}
+
+// TestCUSUMDetector_MultipleMetricShifts tests detecting shifts in multiple metrics
+func TestCUSUMDetector_MultipleMetricShifts(t *testing.T) {
+	detector := NewCUSUMDetector(0.5, 4.0)
+
+	// Create baseline
+	historical := make([]models.Metrics, 10)
+	for i := 0; i < 10; i++ {
+		historical[i] = *createTestMetrics(100.0, 0.05, 50.0)
+	}
+
+	// Initialize
+	_ = detector.Detect(createTestMetrics(100.0, 0.05, 50.0), historical)
+
+	// Apply shifts to all metrics simultaneously
+	foundAnomalies := make(map[models.AnomalyType]bool)
+
+	for i := 0; i < 20; i++ {
+		// All metrics shifted
+		current := createTestMetrics(115.0, 0.08, 60.0)
+		anomalies := detector.Detect(current, historical)
+
+		for _, anomaly := range anomalies {
+			foundAnomalies[anomaly.Type] = true
+		}
+
+		// Check if we've detected all three types
+		if len(foundAnomalies) == 3 {
+			return // Successfully detected all shifts
+		}
+	}
+
+	// Verify we detected at least some anomalies
+	if len(foundAnomalies) == 0 {
+		t.Error("Expected to detect at least one type of anomaly with multiple metric shifts")
+	}
+}
